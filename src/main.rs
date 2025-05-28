@@ -330,7 +330,7 @@ impl BlockWriter {
 
         for line in buf.lines() {
             let line = line?;
-            let indent = "    ".repeat(self.indent);
+            let indent = if self.indent > 0 { "    " } else { "" };
             writeln!(real_out, "{}{}", indent, line)?;
         }
 
