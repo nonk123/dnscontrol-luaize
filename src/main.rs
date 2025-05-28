@@ -91,26 +91,33 @@ fn expr_to_str(expr: &lua_parser::Expression) -> Result<String> {
             }
             s += "\"";
         }
-        Expression::Unary(expr) => match expr {
-            ExprUnary::Length(expr) => {
-                s += "(";
-                s += &expr_to_str(&expr.value)?;
-                s += ".length)";
-            }
-            ExprUnary::Minus(expr) => {
-                s += "(-";
-                s += &expr_to_str(&expr.value)?;
-                s += ")"
-            }
-            ExprUnary::Plus(expr) => {
-                s += "(+";
-                s += &expr_to_str(&expr.value)?;
-                s += ")"
-            }
-            other => {
-                return Err(eyre!("Expression currently unsupported: {:?}", other));
-            }
-        },
+        Expression::Unary(expr) => {
+            s += "(";
+
+            match expr {
+                ExprUnary::Length(expr) => {
+                    s += &expr_to_str(&expr.value)?;
+                    s += ".length";
+                }
+                ExprUnary::Minus(expr) => {
+                    s += "-";
+                    s += &expr_to_str(&expr.value)?;
+                }
+                ExprUnary::Plus(expr) => {
+                    s += "+";
+                    s += &expr_to_str(&expr.value)?;
+                }
+                ExprUnary::LogicalNot(expr) => {
+                    s += "!";
+                    s += &expr_to_str(&expr.value)?;
+                }
+                other => {
+                    return Err(eyre!("Expression currently unsupported: {:?}", other));
+                }
+            };
+
+            s += ")"
+        }
         Expression::Binary(expr) => {
             let (lhs, rhs, op) = match expr.clone() {
                 ExprBinary::Add(expr) => (expr.lhs, expr.rhs, "+"),
@@ -126,6 +133,8 @@ fn expr_to_str(expr: &lua_parser::Expression) -> Result<String> {
                 ExprBinary::GreaterEqual(expr) => (expr.lhs, expr.rhs, ">="),
                 ExprBinary::LessThan(expr) => (expr.lhs, expr.rhs, "<"),
                 ExprBinary::LessEqual(expr) => (expr.lhs, expr.rhs, "<="),
+                ExprBinary::LogicalAnd(expr) => (expr.lhs, expr.rhs, "&&"),
+                ExprBinary::LogicalOr(expr) => (expr.lhs, expr.rhs, "||"),
                 other => return Err(eyre!("Unsupported binary operator: {:?}", other)),
             };
 
@@ -379,4 +388,5 @@ mod tests {
 
     test!(basic);
     test!(colon);
+    test!(ifs);
 }
