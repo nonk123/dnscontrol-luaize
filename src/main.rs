@@ -41,8 +41,19 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
     fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
         let mut s = String::new();
 
-        s += &expr_to_str(&expr.prefix)?;
+        if let Some(ref method) = expr.method {
+            s += &method;
+        } else {
+            s += &expr_to_str(&expr.prefix)?;
+        }
+
         s += "(";
+        if expr.method.is_some() {
+            s += &expr_to_str(&expr.prefix)?;
+            if !expr.args.args.is_empty() {
+                s += ", ";
+            }
+        }
 
         let mut iter = expr.args.args.iter().peekable();
         while let Some(expr) = iter.next() {
@@ -63,7 +74,11 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
         use lua_parser::{ExprBinary, ExprUnary, Expression, TableField};
         match expr {
             Expression::Ident(expr) => {
-                s += &expr.name.to_string();
+                if expr.name.as_str() == "this" {
+                    return Err(eyre!("Illegal identifier 'this'"));
+                } else {
+                    s += &expr.name.to_string();
+                }
             }
             Expression::Bool(expr) => {
                 s = String::from(if expr.value { "true" } else { "false" });
@@ -338,4 +353,5 @@ mod tests {
     }
 
     test!(basic);
+    test!(colon);
 }

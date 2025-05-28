@@ -8,4 +8,4 @@ function Add()
     return Add2(a, b)
 end
 
-print("Add = ", Add())
+console.log("Add", Add())
