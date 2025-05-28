@@ -75,11 +75,11 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                 s = String::from("undefined");
             }
             Expression::String(expr) => {
-                s += "(\""; // TODO: UTF-8?
+                s += "\""; // TODO: UTF-8?
                 for c in &expr.value {
                     s += &format!("\\x{:x?}", c);
                 }
-                s += "\")";
+                s += "\"";
             }
             Expression::Unary(expr) => match expr {
                 ExprUnary::Length(expr) => {
