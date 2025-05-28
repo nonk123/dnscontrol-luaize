@@ -179,7 +179,6 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
     }
 
     fn write_block(out: &mut impl Write, block: &lua_parser::Block) -> Result<()> {
-        use lua_parser::Expression;
         use lua_parser::Statement::*;
 
         for stmt in &block.statements {
@@ -192,17 +191,12 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
                         return Err(eyre!("Parallel assignment currently unsupported"));
                     }
 
-                    match &stmt.lhs[0] {
-                        Expression::Ident(ident) => {
-                            writeln!(out, "{} = {};", ident.name, expr_to_str(&stmt.rhs[0])?)?;
-                        }
-                        other => {
-                            return Err(eyre!(
-                                "Left-hand-side assignment magic currently unsupported: {:?}",
-                                other
-                            ));
-                        }
-                    }
+                    writeln!(
+                        out,
+                        "{} = {};",
+                        expr_to_str(&stmt.lhs[0])?,
+                        expr_to_str(&stmt.rhs[0])?
+                    )?;
                 }
                 LocalDeclaration(stmt) => {
                     if stmt.names.len() > 1 {
