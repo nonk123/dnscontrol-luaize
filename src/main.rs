@@ -41,22 +41,18 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
     fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
         let mut s = String::new();
 
-        s += "((";
         s += &expr_to_str(&expr.prefix)?;
-        s += ")(";
+        s += "(";
 
         let mut iter = expr.args.args.iter().peekable();
         while let Some(expr) = iter.next() {
-            s += "(";
             s += &expr_to_str(expr)?;
-            s += ")";
-
             if iter.peek().is_some() {
                 s += ", ";
             }
         }
 
-        s += "))";
+        s += ")";
 
         Ok(s)
     }
@@ -67,7 +63,7 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
         use lua_parser::{ExprBinary, ExprUnary, Expression, TableField};
         match expr {
             Expression::Ident(expr) => {
-                s = expr.name.to_string();
+                s += &expr.name.to_string();
             }
             Expression::Bool(expr) => {
                 s = String::from(if expr.value { "true" } else { "false" });
@@ -79,27 +75,27 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
                 s = String::from("undefined");
             }
             Expression::String(expr) => {
-                s += "\""; // TODO: UTF-8?
+                s += "(\""; // TODO: UTF-8?
                 for c in &expr.value {
                     s += &format!("\\x{:x?}", c);
                 }
-                s += "\"";
+                s += "\")";
             }
             Expression::Unary(expr) => match expr {
                 ExprUnary::Length(expr) => {
                     s += "(";
                     s += &expr_to_str(&expr.value)?;
-                    s += ".length())";
+                    s += ".length)";
                 }
                 ExprUnary::Minus(expr) => {
-                    s += "(-(";
+                    s += "(-";
                     s += &expr_to_str(&expr.value)?;
-                    s += "))"
+                    s += ")"
                 }
                 ExprUnary::Plus(expr) => {
-                    s += "(+(";
+                    s += "(+";
                     s += &expr_to_str(&expr.value)?;
-                    s += "))"
+                    s += ")"
                 }
                 other => {
                     return Err(eyre!("Expression currently unsupported: {:?}", other));
@@ -123,15 +119,11 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
                     other => return Err(eyre!("Unsupported binary operator: {:?}", other)),
                 };
 
-                s += "((";
-                s += &expr_to_str(&lhs)?;
-                s += ")";
-
-                s += op;
-
                 s += "(";
+                s += &expr_to_str(&lhs)?;
+                s += op;
                 s += &expr_to_str(&rhs)?;
-                s += "))";
+                s += ")";
             }
             Expression::FunctionCall(expr) => {
                 s = funcall_to_string(expr)?;
@@ -168,9 +160,9 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
             Expression::TableIndex(expr) => {
                 s += "(";
                 s += &expr_to_str(&expr.table)?;
-                s += ")[(";
+                s += "[";
                 s += &expr_to_str(&expr.index)?;
-                s += ")]";
+                s += "])";
             }
             other => return Err(eyre!("Expression unsupported: {:?}", other)),
         }
@@ -305,7 +297,7 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
             if stmt.values.len() > 1 {
                 return Err(eyre!("Multiple return values currently unsupported"));
             }
-            writeln!(out, "return ({});", expr_to_str(&stmt.values[0])?)?;
+            writeln!(out, "return {};", expr_to_str(&stmt.values[0])?)?;
         }
 
         Ok(())
