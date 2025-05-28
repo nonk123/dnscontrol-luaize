@@ -1,0 +1,353 @@
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use color_eyre::eyre::eyre;
+
+type Result<T> = color_eyre::eyre::Result<T>;
+
+fn main() -> Result<()> {
+    let _ = color_eyre::install();
+
+    let mut out = File::create(js_path()?)?;
+    luaize(&lua_path()?, &mut out)?;
+
+    let mut cmd = Command::new("dnscontrol");
+    for arg in std::env::args() {
+        cmd.arg(arg);
+    }
+
+    let mut child = cmd.spawn()?;
+    child.wait()?;
+    Ok(())
+}
+
+fn lua_path() -> Result<PathBuf> {
+    Ok(std::env::current_dir()?.join("dnscontrol.lua"))
+}
+
+fn js_path() -> Result<PathBuf> {
+    Ok(std::env::current_dir()?.join("dnscontrol.js"))
+}
+
+pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
+    let source = std::fs::read(path)?;
+    let ast = lua_parser::parse_bytes(&source)?;
+    return write_block(out, &ast);
+
+    fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
+        let mut s = String::new();
+
+        s += "((";
+        s += &expr_to_str(&expr.prefix)?;
+        s += ")(";
+
+        let mut iter = expr.args.args.iter().peekable();
+        while let Some(expr) = iter.next() {
+            s += "(";
+            s += &expr_to_str(expr)?;
+            s += ")";
+
+            if iter.peek().is_some() {
+                s += ", ";
+            }
+        }
+
+        s += "))";
+
+        Ok(s)
+    }
+
+    fn expr_to_str(expr: &lua_parser::Expression) -> Result<String> {
+        let mut s = String::new();
+
+        use lua_parser::{ExprBinary, ExprUnary, Expression, TableField};
+        match expr {
+            Expression::Ident(expr) => {
+                s = expr.name.to_string();
+            }
+            Expression::Bool(expr) => {
+                s = String::from(if expr.value { "true" } else { "false" });
+            }
+            Expression::Numeric(expr) => {
+                s = expr.value.to_string();
+            }
+            Expression::Nil(_) => {
+                s = String::from("undefined");
+            }
+            Expression::String(expr) => {
+                s += "\""; // TODO: UTF-8?
+                for c in &expr.value {
+                    s += &format!("\\x{:x?}", c);
+                }
+                s += "\"";
+            }
+            Expression::Unary(expr) => match expr {
+                ExprUnary::Length(expr) => {
+                    s += "(";
+                    s += &expr_to_str(&expr.value)?;
+                    s += ".length())";
+                }
+                ExprUnary::Minus(expr) => {
+                    s += "(-(";
+                    s += &expr_to_str(&expr.value)?;
+                    s += "))"
+                }
+                ExprUnary::Plus(expr) => {
+                    s += "(+(";
+                    s += &expr_to_str(&expr.value)?;
+                    s += "))"
+                }
+                other => {
+                    return Err(eyre!("Expression currently unsupported: {:?}", other));
+                }
+            },
+            Expression::Binary(expr) => {
+                let (lhs, rhs, op) = match expr.clone() {
+                    ExprBinary::Add(expr) => (expr.lhs, expr.rhs, "+"),
+                    ExprBinary::Sub(expr) => (expr.lhs, expr.rhs, "-"),
+                    ExprBinary::Mul(expr) => (expr.lhs, expr.rhs, "*"),
+                    ExprBinary::Div(expr) => (expr.lhs, expr.rhs, "/"),
+                    ExprBinary::FloorDiv(expr) => (expr.lhs, expr.rhs, "/"), // TODO: differentiate from regular division...
+                    ExprBinary::Mod(expr) => (expr.lhs, expr.rhs, "*"),
+                    ExprBinary::Concat(expr) => (expr.lhs, expr.rhs, "+"),
+                    ExprBinary::Equal(expr) => (expr.lhs, expr.rhs, "==="),
+                    ExprBinary::NotEqual(expr) => (expr.lhs, expr.rhs, "!=="),
+                    ExprBinary::GreaterThan(expr) => (expr.lhs, expr.rhs, ">"),
+                    ExprBinary::GreaterEqual(expr) => (expr.lhs, expr.rhs, ">="),
+                    ExprBinary::LessThan(expr) => (expr.lhs, expr.rhs, "<"),
+                    ExprBinary::LessEqual(expr) => (expr.lhs, expr.rhs, "<="),
+                    other => return Err(eyre!("Unsupported binary operator: {:?}", other)),
+                };
+
+                s += "((";
+                s += &expr_to_str(&lhs)?;
+                s += ")";
+
+                s += op;
+
+                s += "(";
+                s += &expr_to_str(&rhs)?;
+                s += "))";
+            }
+            Expression::FunctionCall(expr) => {
+                s = funcall_to_string(expr)?;
+            }
+            Expression::Table(expr) => {
+                s += "({";
+
+                let mut iter = expr.fields.iter().peekable();
+                while let Some(field) = iter.next() {
+                    match field {
+                        TableField::KeyValue(kv) => {
+                            s += &expr_to_str(&kv.key)?;
+                            s += ": ";
+                            s += &expr_to_str(&kv.value)?;
+                        }
+                        TableField::NameValue(nv) => {
+                            s += "\"";
+                            s += &nv.name;
+                            s += "\": ";
+                            s += &expr_to_str(&nv.value)?;
+                        }
+                        TableField::Value(_) => {
+                            return Err(eyre!("Table value without a key currently unsupported"));
+                        }
+                    };
+
+                    if iter.peek().is_some() {
+                        s += ", ";
+                    }
+                }
+
+                s += "})";
+            }
+            Expression::TableIndex(expr) => {
+                s += "(";
+                s += &expr_to_str(&expr.table)?;
+                s += ")[(";
+                s += &expr_to_str(&expr.index)?;
+                s += ")]";
+            }
+            other => return Err(eyre!("Expression unsupported: {:?}", other)),
+        }
+
+        Ok(s)
+    }
+
+    fn write_block(out: &mut impl Write, block: &lua_parser::Block) -> Result<()> {
+        use lua_parser::Expression;
+        use lua_parser::Statement::*;
+
+        for stmt in &block.statements {
+            match stmt {
+                None(_) => {
+                    writeln!(out, ";")?;
+                }
+                Assignment(stmt) => {
+                    if stmt.lhs.len() > 1 || stmt.rhs.len() > 1 {
+                        return Err(eyre!("Parallel assignment currently unsupported"));
+                    }
+
+                    match &stmt.lhs[0] {
+                        Expression::Ident(ident) => {
+                            writeln!(out, "{} = {};", ident.name, expr_to_str(&stmt.rhs[0])?)?;
+                        }
+                        other => {
+                            return Err(eyre!(
+                                "Left-hand-side assignment magic currently unsupported: {:?}",
+                                other
+                            ));
+                        }
+                    }
+                }
+                LocalDeclaration(stmt) => {
+                    if stmt.names.len() > 1 {
+                        return Err(eyre!("Local multiple declarations currently unsupported"));
+                    }
+                    let Some(values) = &stmt.values else {
+                        return Err(eyre!("Local declarations without assignment unsupported"));
+                    };
+                    writeln!(
+                        out,
+                        "var {} = {};",
+                        stmt.names[0].name,
+                        expr_to_str(&values[0])?
+                    )?;
+                }
+                If(stmt) => {
+                    writeln!(out, "if ({}) {{", expr_to_str(&stmt.condition)?)?;
+                    write_block(out, &stmt.block)?;
+                    writeln!(out, "}}")?;
+
+                    for stmt in &stmt.else_ifs {
+                        writeln!(out, "else if ({}) {{", expr_to_str(&stmt.condition)?)?;
+                        write_block(out, &stmt.block)?;
+                        writeln!(out, "}}")?;
+                    }
+
+                    if let Some(block) = &stmt.else_block {
+                        writeln!(out, "else {{")?;
+                        write_block(out, &block)?;
+                        writeln!(out, "}}")?;
+                    }
+                }
+                While(stmt) => {
+                    writeln!(out, "while ({}) {{", expr_to_str(&stmt.condition)?)?;
+                    write_block(out, &stmt.block)?;
+                    writeln!(out, "}}")?;
+                }
+                For(stmt) => {
+                    writeln!(
+                        out,
+                        "for (var {} = {}; {}; {}) {{",
+                        stmt.name,
+                        expr_to_str(&stmt.start)?,
+                        expr_to_str(&stmt.end)?,
+                        expr_to_str(&stmt.step)?
+                    )?;
+                    write_block(out, &stmt.block)?;
+                    writeln!(out, "}}")?;
+                }
+                Break(_) => {
+                    writeln!(out, "break;")?;
+                }
+                Do(stmt) => {
+                    writeln!(out, "(function() {{")?;
+                    write_block(out, &stmt.block)?;
+                    writeln!(out, "}})();")?;
+                }
+                FunctionCall(expr) => {
+                    writeln!(out, "{};", &funcall_to_string(expr)?)?;
+                }
+                FunctionDefinition(stmt) => {
+                    if stmt.body.parameters.variadic {
+                        return Err(eyre!("Variadic functions currently unsupported"));
+                    }
+                    writeln!(
+                        out,
+                        "function {}({}) {{",
+                        stmt.name.names[0],
+                        stmt.body
+                            .parameters
+                            .names
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )?;
+                    write_block(out, &stmt.body.block)?;
+                    writeln!(out, "}}")?;
+                }
+                FunctionDefinitionLocal(stmt) => {
+                    if stmt.body.parameters.variadic {
+                        return Err(eyre!("Variadic functions currently unsupported"));
+                    }
+                    writeln!(
+                        out,
+                        "var {} = ({}) => {{",
+                        stmt.name,
+                        stmt.body
+                            .parameters
+                            .names
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )?;
+                    write_block(out, &stmt.body.block)?;
+                    writeln!(out, "}};")?;
+                }
+                other => {
+                    return Err(eyre!("Statement unsupported: {:?}", other));
+                }
+            }
+        }
+
+        if let Some(stmt) = &block.return_statement {
+            if stmt.values.len() > 1 {
+                return Err(eyre!("Multiple return values currently unsupported"));
+            }
+            writeln!(out, "return ({});", expr_to_str(&stmt.values[0])?)?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, path::PathBuf};
+
+    fn test_path(name: &str) -> PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join(name)
+            .with_extension("lua")
+    }
+
+    fn run_test(name: &str) {
+        let inpath = test_path(name);
+        println!("Testing {:?}", inpath);
+
+        let outpath = std::env::temp_dir().join(name).with_extension("js");
+        let mut out = File::create(outpath).unwrap();
+
+        super::luaize(&inpath, &mut out).expect("Failed to luaize");
+    }
+
+    macro_rules! test {
+        ($name:ident) => {
+            #[test]
+            fn $name() {
+                run_test(stringify!($name));
+            }
+        };
+    }
+
+    test!(basic);
+}

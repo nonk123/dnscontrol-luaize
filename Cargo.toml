@@ -1,0 +1,8 @@
+[package]
+name = "dnscontrol-luaize"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lua_parser = { git = "https://github.com/ehwan/lua_rust.git", rev = "4b6ca92ecc399e990a63667bbdf5c64ebc0b84b0" }
+color-eyre = "0.6"
