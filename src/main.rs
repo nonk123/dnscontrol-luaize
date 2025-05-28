@@ -33,7 +33,7 @@ fn js_path() -> Result<PathBuf> {
     Ok(std::env::current_dir()?.join("dnscontrol.js"))
 }
 
-pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
+pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
     let source = std::fs::read(path)?;
     let ast = lua_parser::parse_bytes(&source)?;
     return write_block(out, &ast);
@@ -170,7 +170,7 @@ pub fn luaize(path: &Path, out: &mut impl Write) -> Result<()> {
         Ok(s)
     }
 
-    fn write_block(out: &mut impl Write, block: &lua_parser::Block) -> Result<()> {
+    fn write_block(out: &mut dyn Write, block: &lua_parser::Block) -> Result<()> {
         use lua_parser::Statement::*;
 
         for stmt in &block.statements {
