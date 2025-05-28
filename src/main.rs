@@ -317,6 +317,8 @@ mod tests {
     }
 
     fn run_test(name: &str) {
+        let _ = color_eyre::install();
+
         let inpath = test_path(name);
         println!("Testing {:?}", inpath);
 
