@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::Write,
+    io::{BufRead, Cursor, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -33,160 +33,171 @@ fn js_path() -> Result<PathBuf> {
     Ok(std::env::current_dir()?.join("dnscontrol.js"))
 }
 
-pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
-    let source = std::fs::read(path)?;
-    let ast = lua_parser::parse_bytes(&source)?;
-    return write_block(out, &ast);
+fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
+    let mut s = String::new();
 
-    fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
-        let mut s = String::new();
-
-        if let Some(ref method) = expr.method {
-            s += &method;
-        } else {
-            s += &expr_to_str(&expr.prefix)?;
-        }
-
-        s += "(";
-        if expr.method.is_some() {
-            s += &expr_to_str(&expr.prefix)?;
-            if !expr.args.args.is_empty() {
-                s += ", ";
-            }
-        }
-
-        let mut iter = expr.args.args.iter().peekable();
-        while let Some(expr) = iter.next() {
-            s += &expr_to_str(expr)?;
-            if iter.peek().is_some() {
-                s += ", ";
-            }
-        }
-
-        s += ")";
-
-        Ok(s)
+    if let Some(ref method) = expr.method {
+        s += &method;
+    } else {
+        s += &expr_to_str(&expr.prefix)?;
     }
 
-    fn expr_to_str(expr: &lua_parser::Expression) -> Result<String> {
-        let mut s = String::new();
+    s += "(";
+    if expr.method.is_some() {
+        s += &expr_to_str(&expr.prefix)?;
+        if !expr.args.args.is_empty() {
+            s += ", ";
+        }
+    }
 
-        use lua_parser::{ExprBinary, ExprUnary, Expression, TableField};
-        match expr {
-            Expression::Ident(expr) => {
-                if expr.name.as_str() == "this" {
-                    return Err(eyre!("Illegal identifier 'this'"));
-                } else {
-                    s += &expr.name.to_string();
-                }
+    let mut iter = expr.args.args.iter().peekable();
+    while let Some(expr) = iter.next() {
+        s += &expr_to_str(expr)?;
+        if iter.peek().is_some() {
+            s += ", ";
+        }
+    }
+
+    s += ")";
+
+    Ok(s)
+}
+
+fn expr_to_str(expr: &lua_parser::Expression) -> Result<String> {
+    let mut s = String::new();
+
+    use lua_parser::{ExprBinary, ExprUnary, Expression, TableField};
+    match expr {
+        Expression::Ident(expr) => {
+            if expr.name.as_str() == "this" {
+                return Err(eyre!("Illegal identifier 'this'"));
+            } else {
+                s += &expr.name.to_string();
             }
-            Expression::Bool(expr) => {
-                s = String::from(if expr.value { "true" } else { "false" });
+        }
+        Expression::Bool(expr) => {
+            s = String::from(if expr.value { "true" } else { "false" });
+        }
+        Expression::Numeric(expr) => {
+            s = expr.value.to_string();
+        }
+        Expression::Nil(_) => {
+            s = String::from("undefined");
+        }
+        Expression::String(expr) => {
+            s += "\""; // TODO: UTF-8?
+            for c in &expr.value {
+                s += &format!("\\x{:x?}", c);
             }
-            Expression::Numeric(expr) => {
-                s = expr.value.to_string();
+            s += "\"";
+        }
+        Expression::Unary(expr) => match expr {
+            ExprUnary::Length(expr) => {
+                s += "(";
+                s += &expr_to_str(&expr.value)?;
+                s += ".length)";
             }
-            Expression::Nil(_) => {
-                s = String::from("undefined");
+            ExprUnary::Minus(expr) => {
+                s += "(-";
+                s += &expr_to_str(&expr.value)?;
+                s += ")"
             }
-            Expression::String(expr) => {
-                s += "\""; // TODO: UTF-8?
-                for c in &expr.value {
-                    s += &format!("\\x{:x?}", c);
-                }
-                s += "\"";
+            ExprUnary::Plus(expr) => {
+                s += "(+";
+                s += &expr_to_str(&expr.value)?;
+                s += ")"
             }
-            Expression::Unary(expr) => match expr {
-                ExprUnary::Length(expr) => {
-                    s += "(";
-                    s += &expr_to_str(&expr.value)?;
-                    s += ".length)";
-                }
-                ExprUnary::Minus(expr) => {
-                    s += "(-";
-                    s += &expr_to_str(&expr.value)?;
-                    s += ")"
-                }
-                ExprUnary::Plus(expr) => {
-                    s += "(+";
-                    s += &expr_to_str(&expr.value)?;
-                    s += ")"
-                }
-                other => {
-                    return Err(eyre!("Expression currently unsupported: {:?}", other));
-                }
-            },
-            Expression::Binary(expr) => {
-                let (lhs, rhs, op) = match expr.clone() {
-                    ExprBinary::Add(expr) => (expr.lhs, expr.rhs, "+"),
-                    ExprBinary::Sub(expr) => (expr.lhs, expr.rhs, "-"),
-                    ExprBinary::Mul(expr) => (expr.lhs, expr.rhs, "*"),
-                    ExprBinary::Div(expr) => (expr.lhs, expr.rhs, "/"),
-                    ExprBinary::FloorDiv(expr) => (expr.lhs, expr.rhs, "/"), // TODO: differentiate from regular division...
-                    ExprBinary::Mod(expr) => (expr.lhs, expr.rhs, "*"),
-                    ExprBinary::Concat(expr) => (expr.lhs, expr.rhs, "+"),
-                    ExprBinary::Equal(expr) => (expr.lhs, expr.rhs, "==="),
-                    ExprBinary::NotEqual(expr) => (expr.lhs, expr.rhs, "!=="),
-                    ExprBinary::GreaterThan(expr) => (expr.lhs, expr.rhs, ">"),
-                    ExprBinary::GreaterEqual(expr) => (expr.lhs, expr.rhs, ">="),
-                    ExprBinary::LessThan(expr) => (expr.lhs, expr.rhs, "<"),
-                    ExprBinary::LessEqual(expr) => (expr.lhs, expr.rhs, "<="),
-                    other => return Err(eyre!("Unsupported binary operator: {:?}", other)),
+            other => {
+                return Err(eyre!("Expression currently unsupported: {:?}", other));
+            }
+        },
+        Expression::Binary(expr) => {
+            let (lhs, rhs, op) = match expr.clone() {
+                ExprBinary::Add(expr) => (expr.lhs, expr.rhs, "+"),
+                ExprBinary::Sub(expr) => (expr.lhs, expr.rhs, "-"),
+                ExprBinary::Mul(expr) => (expr.lhs, expr.rhs, "*"),
+                ExprBinary::Div(expr) => (expr.lhs, expr.rhs, "/"),
+                ExprBinary::FloorDiv(expr) => (expr.lhs, expr.rhs, "/"), // TODO: differentiate from regular division...
+                ExprBinary::Mod(expr) => (expr.lhs, expr.rhs, "*"),
+                ExprBinary::Concat(expr) => (expr.lhs, expr.rhs, "+"),
+                ExprBinary::Equal(expr) => (expr.lhs, expr.rhs, "==="),
+                ExprBinary::NotEqual(expr) => (expr.lhs, expr.rhs, "!=="),
+                ExprBinary::GreaterThan(expr) => (expr.lhs, expr.rhs, ">"),
+                ExprBinary::GreaterEqual(expr) => (expr.lhs, expr.rhs, ">="),
+                ExprBinary::LessThan(expr) => (expr.lhs, expr.rhs, "<"),
+                ExprBinary::LessEqual(expr) => (expr.lhs, expr.rhs, "<="),
+                other => return Err(eyre!("Unsupported binary operator: {:?}", other)),
+            };
+
+            s += "(";
+            s += &expr_to_str(&lhs)?;
+            s += op;
+            s += &expr_to_str(&rhs)?;
+            s += ")";
+        }
+        Expression::FunctionCall(expr) => {
+            s = funcall_to_string(expr)?;
+        }
+        Expression::Table(expr) => {
+            s += "({";
+
+            let mut iter = expr.fields.iter().peekable();
+            while let Some(field) = iter.next() {
+                match field {
+                    TableField::KeyValue(kv) => {
+                        s += &expr_to_str(&kv.key)?;
+                        s += ": ";
+                        s += &expr_to_str(&kv.value)?;
+                    }
+                    TableField::NameValue(nv) => {
+                        s += "\"";
+                        s += &nv.name;
+                        s += "\": ";
+                        s += &expr_to_str(&nv.value)?;
+                    }
+                    TableField::Value(_) => {
+                        return Err(eyre!("Table value without a key currently unsupported"));
+                    }
                 };
 
-                s += "(";
-                s += &expr_to_str(&lhs)?;
-                s += op;
-                s += &expr_to_str(&rhs)?;
-                s += ")";
-            }
-            Expression::FunctionCall(expr) => {
-                s = funcall_to_string(expr)?;
-            }
-            Expression::Table(expr) => {
-                s += "({";
-
-                let mut iter = expr.fields.iter().peekable();
-                while let Some(field) = iter.next() {
-                    match field {
-                        TableField::KeyValue(kv) => {
-                            s += &expr_to_str(&kv.key)?;
-                            s += ": ";
-                            s += &expr_to_str(&kv.value)?;
-                        }
-                        TableField::NameValue(nv) => {
-                            s += "\"";
-                            s += &nv.name;
-                            s += "\": ";
-                            s += &expr_to_str(&nv.value)?;
-                        }
-                        TableField::Value(_) => {
-                            return Err(eyre!("Table value without a key currently unsupported"));
-                        }
-                    };
-
-                    if iter.peek().is_some() {
-                        s += ", ";
-                    }
+                if iter.peek().is_some() {
+                    s += ", ";
                 }
+            }
 
-                s += "})";
-            }
-            Expression::TableIndex(expr) => {
-                s += "(";
-                s += &expr_to_str(&expr.table)?;
-                s += "[";
-                s += &expr_to_str(&expr.index)?;
-                s += "])";
-            }
-            other => return Err(eyre!("Expression unsupported: {:?}", other)),
+            s += "})";
         }
-
-        Ok(s)
+        Expression::TableIndex(expr) => {
+            s += "(";
+            s += &expr_to_str(&expr.table)?;
+            s += "[";
+            s += &expr_to_str(&expr.index)?;
+            s += "])";
+        }
+        other => return Err(eyre!("Expression unsupported: {:?}", other)),
     }
 
-    fn write_block(out: &mut dyn Write, block: &lua_parser::Block) -> Result<()> {
+    Ok(s)
+}
+
+struct BlockWriter {
+    indent: usize,
+}
+
+impl BlockWriter {
+    fn new() -> Self {
+        Self { indent: 0 }
+    }
+
+    fn write_block(&mut self, out: &mut dyn Write, block: &lua_parser::Block) -> Result<()> {
         use lua_parser::Statement::*;
+
+        let real_out = out;
+
+        let mut buf = Vec::new();
+        let out = &mut Cursor::new(&mut buf);
+
+        self.indent += 1;
 
         for stmt in &block.statements {
             match stmt {
@@ -221,24 +232,24 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                 }
                 If(stmt) => {
                     writeln!(out, "if ({}) {{", expr_to_str(&stmt.condition)?)?;
-                    write_block(out, &stmt.block)?;
+                    self.write_block(out, &stmt.block)?;
                     writeln!(out, "}}")?;
 
                     for stmt in &stmt.else_ifs {
                         writeln!(out, "else if ({}) {{", expr_to_str(&stmt.condition)?)?;
-                        write_block(out, &stmt.block)?;
+                        self.write_block(out, &stmt.block)?;
                         writeln!(out, "}}")?;
                     }
 
                     if let Some(block) = &stmt.else_block {
                         writeln!(out, "else {{")?;
-                        write_block(out, &block)?;
+                        self.write_block(out, &block)?;
                         writeln!(out, "}}")?;
                     }
                 }
                 While(stmt) => {
                     writeln!(out, "while ({}) {{", expr_to_str(&stmt.condition)?)?;
-                    write_block(out, &stmt.block)?;
+                    self.write_block(out, &stmt.block)?;
                     writeln!(out, "}}")?;
                 }
                 For(stmt) => {
@@ -250,7 +261,7 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                         expr_to_str(&stmt.end)?,
                         expr_to_str(&stmt.step)?
                     )?;
-                    write_block(out, &stmt.block)?;
+                    self.write_block(out, &stmt.block)?;
                     writeln!(out, "}}")?;
                 }
                 Break(_) => {
@@ -258,7 +269,7 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                 }
                 Do(stmt) => {
                     writeln!(out, "(function() {{")?;
-                    write_block(out, &stmt.block)?;
+                    self.write_block(out, &stmt.block)?;
                     writeln!(out, "}})();")?;
                 }
                 FunctionCall(expr) => {
@@ -280,7 +291,7 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                             .collect::<Vec<_>>()
                             .join(", ")
                     )?;
-                    write_block(out, &stmt.body.block)?;
+                    self.write_block(out, &stmt.body.block)?;
                     writeln!(out, "}}")?;
                 }
                 FunctionDefinitionLocal(stmt) => {
@@ -299,7 +310,7 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
                             .collect::<Vec<_>>()
                             .join(", ")
                     )?;
-                    write_block(out, &stmt.body.block)?;
+                    self.write_block(out, &stmt.body.block)?;
                     writeln!(out, "}};")?;
                 }
                 other => {
@@ -315,8 +326,22 @@ pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
             writeln!(out, "return {};", expr_to_str(&stmt.values[0])?)?;
         }
 
+        self.indent -= 1;
+
+        for line in buf.lines() {
+            let line = line?;
+            let indent = "    ".repeat(self.indent);
+            writeln!(real_out, "{}{}", indent, line)?;
+        }
+
         Ok(())
     }
+}
+
+pub fn luaize(path: &Path, out: &mut dyn Write) -> Result<()> {
+    let source = std::fs::read(path)?;
+    let ast = lua_parser::parse_bytes(&source)?;
+    return BlockWriter::new().write_block(out, &ast);
 }
 
 #[cfg(test)]
