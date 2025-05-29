@@ -26,11 +26,11 @@ fn main() -> Result<()> {
 }
 
 fn lua_path() -> Result<PathBuf> {
-    Ok(std::env::current_dir()?.join("dnscontrol.lua"))
+    Ok(std::env::current_dir()?.join("dnsconfig.lua"))
 }
 
 fn js_path() -> Result<PathBuf> {
-    Ok(std::env::current_dir()?.join("dnscontrol.js"))
+    Ok(std::env::current_dir()?.join("dnsconfig.js"))
 }
 
 fn funcall_to_string(expr: &lua_parser::ExprFunctionCall) -> Result<String> {
